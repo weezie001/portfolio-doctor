@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fefefc"/>
+      <stop offset="1" stop-color="#f2f7f5"/>
+    </linearGradient>
+    <linearGradient id="teal" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#14b8a6"/>
+      <stop offset="1" stop-color="#0f766e"/>
+    </linearGradient>
+  </defs>
+  <!-- paper background -->
+  <rect width="1024" height="1024" rx="224" fill="url(#bg)"/>
+  <rect x="14" y="14" width="996" height="996" rx="210" fill="none" stroke="#0f766e" stroke-opacity="0.14" stroke-width="4"/>
+  <!-- faint ruled lab lines -->
+  <g stroke="#0f766e" stroke-opacity="0.07" stroke-width="4">
+    <line x1="160" y1="240" x2="864" y2="240"/>
+    <line x1="160" y1="784" x2="864" y2="784"/>
+  </g>
+  <!-- clinical cross -->
+  <g>
+    <path d="M 512 272 h 0 c 44 0 80 36 80 80 v 80 h 80 c 44 0 80 36 80 80 s -36 80 -80 80 h -80 v 80 c 0 44 -36 80 -80 80 s -80 -36 -80 -80 v -80 h -80 c -44 0 -80 -36 -80 -80 s 36 -80 80 -80 h 80 v -80 c 0 -44 36 -80 80 -80 z" fill="url(#teal)"/>
+  </g>
+  <!-- ECG pulse line across the cross -->
+  <path d="M 200 512 h 148 l 40 0 28 -64 44 128 40 -170 48 234 40 -128 24 0 h 40 l 172 0"
+        fill="none" stroke="#ffffff" stroke-width="26" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M 200 512 h 148 l 40 0 28 -64 44 128 40 -170 48 234 40 -128 24 0 h 40 l 172 0"
+        fill="none" stroke="#062e2a" stroke-opacity="0.18" stroke-width="26" stroke-linecap="round" stroke-linejoin="round" transform="translate(0,10)"/>
+  <!-- pulse dot -->
+  <circle cx="824" cy="512" r="22" fill="#0f766e"/>
+</svg>

@@ -1,0 +1,19 @@
+{
+  "name": "portfolio-doctor",
+  "version": "0.1.0",
+  "description": "Paid one-shot crypto portfolio audit: concentration risk, perp funding bleed, idle assets, top-3 fixes. OKX AI Genesis Hackathon ASP.",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "audit": "node src/index.js audit",
+    "serve": "node src/server.js",
+    "x402-demo": "node scripts/x402-demo.js",
+    "test": "node --test \"test/**/*.test.js\""
+  },
+  "dependencies": {},
+  "devDependencies": {}
+}
