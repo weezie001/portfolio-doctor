@@ -15,12 +15,26 @@ import { renderReport } from './report/render.js';
 /** Package root (…/portfolio-doctor), independent of process.cwd(). */
 export const PKG_ROOT = fileURLToPath(new URL('..', import.meta.url));
 
-export async function runAudit({ outDir = 'out', now = new Date() } = {}) {
-  const okx = createOkxAdapter();
+/**
+ * Run one audit. Data source:
+ *   - `okxCreds` present -> REAL audit of that customer's OKX account (their
+ *     read-only key; used per-request, never stored).
+ *   - otherwise -> the mock sample portfolio (the no-key demo).
+ */
+export async function runAudit({ outDir = 'out', now = new Date(), okxCreds = null } = {}) {
+  const okx = okxCreds
+    ? createOkxAdapter('real', { creds: okxCreds })
+    : createOkxAdapter('mock');
   const llm = createLlmAdapter();
 
   // 1. Ingest — one snapshot through the adapter boundary.
   const snapshot = await okx.getSnapshot(now.getTime());
+
+  // Real audit of an account with no holdings/positions: return an honest
+  // "nothing to audit" marker rather than rendering an undefined-score report.
+  if (okxCreds && snapshot.balances.length === 0 && snapshot.positions.length === 0) {
+    return { empty: true, mode: 'real', snapshot };
+  }
 
   // 2. Analyze — pure functions over the snapshot.
   const analysis = analyzePortfolio(snapshot, { nowMs: now.getTime() });

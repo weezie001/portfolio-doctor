@@ -36,9 +36,50 @@
  * - Funding sign convention: rate > 0 means longs pay shorts (OKX standard).
  */
 
+import crypto from 'node:crypto';
 import { round } from '../util/format.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+
+// OKX v5 REST. Account endpoints are signed with the CUSTOMER's read-only key
+// (supplied per request — never stored); market endpoints are public (no auth).
+const OKX_BASE = process.env.OKX_API_BASE_URL || 'https://www.okx.com';
+const OKX_HTTP_TIMEOUT_MS = Number(process.env.OKX_HTTP_TIMEOUT_MS || 8000);
+const baseCcy = (instId) => instId.split('-')[0];
+
+async function okxFetch(path, headers = {}) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), OKX_HTTP_TIMEOUT_MS);
+  try {
+    const res = await fetch(`${OKX_BASE}${path}`, { signal: ctrl.signal, headers });
+    const json = await res.json();
+    if (String(json.code) !== '0') {
+      throw new Error(`OKX API ${json.code}: ${json.msg} (${path.split('?')[0]})`);
+    }
+    return json.data;
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+const publicGet = (path) => okxFetch(path, { 'User-Agent': 'portfolio-doctor' });
+
+// Signed GET for authenticated account endpoints (read-only key).
+function signedGet(path, creds) {
+  const ts = new Date().toISOString();
+  const sign = crypto
+    .createHmac('sha256', creds.secret)
+    .update(ts + 'GET' + path)
+    .digest('base64');
+  return okxFetch(path, {
+    'OK-ACCESS-KEY': creds.key,
+    'OK-ACCESS-SIGN': sign,
+    'OK-ACCESS-TIMESTAMP': ts,
+    'OK-ACCESS-PASSPHRASE': creds.passphrase,
+    'Content-Type': 'application/json',
+    'User-Agent': 'portfolio-doctor',
+  });
+}
 
 export class OkxRealModeNotWiredError extends Error {
   constructor(message) {
@@ -244,101 +285,141 @@ function notWired(method, lines) {
   );
 }
 
-const realAdapter = {
-  mode: 'real',
+/**
+ * REAL adapter for a CUSTOMER-supplied read-only OKX key. Account data
+ * (balances/positions/orders) is signed with their key; prices/funding are
+ * public. Earn APYs and asset betas are market-wide (the mock constants) — not
+ * account-specific, so they need no per-user call. Read-only: this never
+ * places or cancels anything.
+ */
+function createRealAdapter(creds) {
+  if (!creds?.key || !creds?.secret || !creds?.passphrase) {
+    throw new OkxRealModeNotWiredError(
+      'okx adapter: real mode needs a read-only OKX API key (key, secret, passphrase). ' +
+        'Supply them in the audit request, or run in mock mode for the sample demo.'
+    );
+  }
 
-  // REAL MODE STUB — balances (trading + funding + earn, one shot)
-  //   CLI:  okx account balance-all --json
-  //         -> { trading: { details[] }, funding: { details[] }, valuation }
-  //   Earn allocations (for `inEarn`):
-  //         okx account asset-balance --valuation --json   (details.earn)
-  //         okx earn savings balance --json                (per-ccy amounts in Simple Earn)
-  //   REST: GET /api/v5/account/balance , GET /api/v5/asset/balances ,
-  //         GET /api/v5/asset/asset-valuation
-  async getBalances() {
-    throw notWired('getBalances', [
-      'okx account balance-all --json',
-      'okx earn savings balance --json   # to fill the inEarn field',
+  async function getPrices() {
+    const tickers = await publicGet('/api/v5/market/tickers?instType=SPOT');
+    const prices = { USDT: 1 };
+    for (const t of tickers) {
+      if (t.instId.endsWith('-USDT')) prices[baseCcy(t.instId)] = Number(t.last);
+    }
+    return prices;
+  }
+
+  async function getBalances() {
+    const data = await signedGet('/api/v5/account/balance', creds);
+    const details = data?.[0]?.details ?? [];
+    return details
+      .map((d) => ({
+        ccy: d.ccy,
+        total: Number(d.cashBal || d.eq || 0),
+        available: Number(d.availBal || d.availEq || d.cashBal || 0),
+        inEarn: 0,
+      }))
+      .filter((b) => b.total > 0);
+  }
+
+  async function getPositions() {
+    const rows = await signedGet('/api/v5/account/positions?instType=SWAP', creds);
+    return (rows ?? [])
+      .filter((p) => Number(p.pos) !== 0)
+      .map((p) => {
+        const size = Math.abs(Number(p.pos));
+        const side = p.posSide === 'net' ? (Number(p.pos) >= 0 ? 'long' : 'short') : p.posSide;
+        return {
+          instId: p.instId,
+          sizeCcy: baseCcy(p.instId),
+          side,
+          size,
+          entryPx: Number(p.avgPx),
+          lever: Number(p.lever),
+          markPx: Number(p.markPx),
+          notionalUsd: round(Number(p.notionalUsd)),
+          uplUsd: round(Number(p.upl)),
+          marginUsd: round(Number(p.margin || p.imr || 0)),
+        };
+      });
+  }
+
+  async function getOpenOrders() {
+    const rows = await signedGet('/api/v5/trade/orders-pending', creds);
+    return (rows ?? []).map((o) => ({
+      instId: o.instId,
+      side: o.side,
+      ordType: o.ordType,
+      px: Number(o.px),
+      sz: Number(o.sz),
+      cTime: Number(o.cTime),
+    }));
+  }
+
+  async function getFundingRates(instIds = []) {
+    const out = {};
+    for (const instId of instIds) {
+      try {
+        const d = await publicGet(`/api/v5/public/funding-rate?instId=${encodeURIComponent(instId)}`);
+        out[instId] = Number(d[0].fundingRate);
+      } catch { /* skip a momentarily-unavailable funding rate */ }
+    }
+    return out;
+  }
+
+  // Market-wide (not account-specific) — reuse the curated constants.
+  async function getEarnRates() {
+    return structuredClone(MOCK_EARN_RATES);
+  }
+  async function getMarketStats() {
+    return structuredClone(MOCK_MARKET_STATS);
+  }
+
+  async function getSnapshot(nowMs = Date.now()) {
+    const [balances, positions, openOrders, prices] = await Promise.all([
+      getBalances(),
+      getPositions(),
+      getOpenOrders(),
+      getPrices(),
     ]);
-  },
+    const fundingRates = await getFundingRates(positions.map((p) => p.instId));
+    return {
+      meta: {
+        mode: 'real',
+        accountLabel: `OKX account •••• (live, read-only key ${String(creds.key).slice(0, 4)}…)`,
+        asOf: new Date(nowMs).toISOString(),
+      },
+      balances,
+      positions,
+      openOrders,
+      prices,
+      fundingRates,
+      earnRates: structuredClone(MOCK_EARN_RATES),
+      marketStats: structuredClone(MOCK_MARKET_STATS),
+    };
+  }
 
-  // REAL MODE STUB — open perpetual positions
-  //   CLI:  okx account positions --instType SWAP --json
-  //         -> instId, posSide/side, pos (size), avgPx (entryPx), upl, lever, margin
-  //   REST: GET /api/v5/account/positions?instType=SWAP
-  async getPositions() {
-    throw notWired('getPositions', ['okx account positions --instType SWAP --json']);
-  },
-
-  // REAL MODE STUB — pending orders (spot + swap)
-  //   CLI:  okx spot orders --json          # open/pending spot orders
-  //         okx swap orders --json          # open/pending swap orders
-  //   REST: GET /api/v5/trade/orders-pending
-  async getOpenOrders() {
-    throw notWired('getOpenOrders', ['okx spot orders --json', 'okx swap orders --json']);
-  },
-
-  // REAL MODE STUB — spot mark prices for every held asset
-  //   CLI:  okx market tickers SPOT --json         # bulk, filter to held ccys
-  //         okx market ticker BTC-USDT --json      # or per-instrument
-  //   REST: GET /api/v5/market/tickers?instType=SPOT
-  async getPrices() {
-    throw notWired('getPrices', ['okx market tickers SPOT --json']);
-  },
-
-  // REAL MODE STUB — current funding rate per open swap position
-  //   CLI:  okx market funding-rate SOL-USDT-SWAP --json   # one call per position
-  //         (instId MUST end in -SWAP)
-  //   REST: GET /api/v5/public/funding-rate?instId=...
-  async getFundingRates() {
-    throw notWired('getFundingRates', [
-      'okx market funding-rate <instId>-SWAP --json   # per open position',
-    ]);
-  },
-
-  // REAL MODE STUB — best available Earn APY per held currency
-  //   CLI:  okx --profile live earn savings rate-history --ccy USDT --limit 1 --json
-  //         -> use the `lendingRate` field as the flexible APY (NOT `rate`)
-  //   Staking products (ETH/SOL): okx-cex-earn on-chain commands
-  //   REST: GET /api/v5/finance/savings/lending-rate-summary ,
-  //         GET /api/v5/finance/staking-defi/offers
-  async getEarnRates() {
-    throw notWired('getEarnRates', [
-      'okx --profile live earn savings rate-history --ccy <ccy> --limit 1 --json',
-    ]);
-  },
-
-  // REAL MODE STUB — betas + volatility from 30 daily candles per asset
-  //   CLI:  okx market candles BTC-USDT --bar 1D --limit 31 --json   # benchmark
-  //         okx market candles <ccy>-USDT --bar 1D --limit 31 --json # per asset
-  //   Then: computeBetaFromCloses(assetCloses, btcCloses) in
-  //         src/analysis/drawdown.js (pure, already implemented + tested).
-  //   REST: GET /api/v5/market/candles?instId=...&bar=1D&limit=31
-  async getMarketStats() {
-    throw notWired('getMarketStats', [
-      'okx market candles <ccy>-USDT --bar 1D --limit 31 --json  # + BTC benchmark',
-    ]);
-  },
-
-  async getSnapshot() {
-    // Real implementation will fan out to the six methods above and assemble
-    // the same snapshot shape buildMockSnapshot() returns.
-    throw notWired('getSnapshot', [
-      'okx account balance-all --json',
-      'okx account positions --instType SWAP --json',
-      'okx spot orders --json && okx swap orders --json',
-      'okx market tickers SPOT --json',
-      'okx market funding-rate <instId> --json      # per open swap',
-      'okx --profile live earn savings rate-history --ccy <ccy> --limit 1 --json',
-      'okx market candles <ccy>-USDT --bar 1D --limit 31 --json',
-    ]);
-  },
-};
+  return {
+    mode: 'real',
+    getBalances,
+    getPositions,
+    getOpenOrders,
+    getPrices,
+    getFundingRates,
+    getEarnRates,
+    getMarketStats,
+    getSnapshot,
+  };
+}
 
 /* ------------------------------------------------------------------------ */
 
-export function createOkxAdapter(mode = getConfiguredMode()) {
+/**
+ * @param {string} mode 'mock' | 'real'
+ * @param {{creds?: {key,secret,passphrase}}} [opts] real mode needs a read-only key
+ */
+export function createOkxAdapter(mode = getConfiguredMode(), opts = {}) {
   if (mode === 'mock') return mockAdapter;
-  if (mode === 'real') return realAdapter;
+  if (mode === 'real') return createRealAdapter(opts.creds);
   throw new Error(`Unknown OKX_MODE "${mode}" — expected "mock" or "real".`);
 }

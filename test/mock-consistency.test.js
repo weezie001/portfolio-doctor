@@ -95,14 +95,20 @@ test('mock snapshot: total equity = spot + margin + upl', () => {
   assert.ok(a.drawdown.equityUsd > 100000, 'demo account is meaningfully sized');
 });
 
-test('adapters: default mode is mock; real mode throws documented stubs', async () => {
+test('adapters: default mode is mock; real OKX mode needs a read-only key', async () => {
   assert.equal(createOkxAdapter().mode, 'mock');
   assert.equal(createLlmAdapter().mode, 'mock');
 
-  const realOkx = createOkxAdapter('real');
-  await assert.rejects(realOkx.getSnapshot(), OkxRealModeNotWiredError);
-  await assert.rejects(realOkx.getBalances(), /okx account balance-all --json/);
-  await assert.rejects(realOkx.getFundingRates(), /funding-rate/);
+  // Real OKX mode requires a customer-supplied read-only key; without one it
+  // fails fast with a clear message (never silently returns mock data).
+  assert.throws(() => createOkxAdapter('real'), OkxRealModeNotWiredError);
+  assert.throws(() => createOkxAdapter('real', { creds: { key: 'k' } }), OkxRealModeNotWiredError);
+  // With full creds it constructs a working real adapter (no network here).
+  const realOkx = createOkxAdapter('real', {
+    creds: { key: 'k', secret: 's', passphrase: 'p' },
+  });
+  assert.equal(realOkx.mode, 'real');
+  assert.equal(typeof realOkx.getSnapshot, 'function');
 
   const realLlm = createLlmAdapter('real');
   const s = buildMockSnapshot(NOW);

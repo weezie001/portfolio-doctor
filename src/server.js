@@ -76,6 +76,22 @@ async function drainBody(req) {
   }
 }
 
+/** Read the request body as text, capped at MAX_BODY_BYTES. */
+async function readBodyText(req) {
+  const chunks = [];
+  let received = 0;
+  for await (const chunk of req) {
+    received += chunk.length;
+    if (received > MAX_BODY_BYTES) {
+      const err = new Error('Request body too large');
+      err.statusCode = 413;
+      throw err;
+    }
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks).toString('utf8');
+}
+
 /* ------------------------------ audit JSON ------------------------------- */
 
 /** Shape the runAudit() result into the /api/audit response payload. */
@@ -163,7 +179,20 @@ export function createApp({ outDir = 'out', env = process.env } = {}) {
           error: 'Use POST /api/audit',
         });
       }
-      await drainBody(req); // demo mode: credentials are neither expected nor read
+      // Read the JSON body. A customer may supply their OWN read-only OKX key
+      // ({okxKey, okxSecret, okxPassphrase}) to audit their real account; with
+      // none, the audit runs on the mock sample portfolio (the no-key demo).
+      let body = {};
+      try {
+        const raw = await readBodyText(req);
+        if (raw.trim()) body = JSON.parse(raw);
+      } catch {
+        return sendJson(req, res, 400, { ok: false, error: 'Body must be JSON (or empty).' });
+      }
+      const okxCreds =
+        body.okxKey && body.okxSecret && body.okxPassphrase
+          ? { key: String(body.okxKey), secret: String(body.okxSecret), passphrase: String(body.okxPassphrase) }
+          : null;
 
       // x402 handshake (no-op when X402_MODE=off): no/invalid X-PAYMENT ->
       // 402 challenge with PAYMENT-REQUIRED; verified+settled -> run the
@@ -175,7 +204,27 @@ export function createApp({ outDir = 'out', env = process.env } = {}) {
 
       const started = Date.now();
       const now = new Date();
-      const result = await runAudit({ outDir, now });
+      let result;
+      try {
+        result = await runAudit({ outDir, now, okxCreds });
+      } catch (err) {
+        // A bad/edge key or OKX error must not 500 the endpoint opaquely.
+        return sendJson(req, res, 502, {
+          ok: false,
+          error: `Audit failed: ${err.message}`,
+          hint: okxCreds ? 'Check the read-only OKX API key (key/secret/passphrase).' : undefined,
+        }, payment.responseHeaders);
+      }
+      if (result.empty) {
+        return sendJson(req, res, 200, {
+          ok: true,
+          empty: true,
+          mode: 'real',
+          message:
+            'No open holdings or positions found for this OKX account — nothing to audit yet. ' +
+            'Connect a key for an account that holds assets, or omit the key to see a sample audit.',
+        }, payment.responseHeaders);
+      }
       return sendJson(
         req,
         res,
